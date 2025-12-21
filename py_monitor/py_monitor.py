@@ -1,101 +1,109 @@
-import psutil
-import time
 import csv
-import os
+from  datetime import datetime as dt
 import logging
+import os
+import psutil
+from socket import gethostname
+import subprocess
 import sys
+import time
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# configuration 
-interval_seconds = 5
+class PyMonitor:
+    def __init__(
+            self,
+            output_csv:str=f'/tmp/py_monitor_data_{gethostname()}_{dt.now().strftime("%Y%m%d_%H%M%S")}.csv',
+            interval_s:float=5):
+        self.target_csv = output_csv
+        self.interval_seconds = float(interval_s)
+        self.process_cache = {}
+        if not os.path.exists(self.target_csv):
+            with open(self.target_csv, mode='w', newline='') as f:
+                writer = csv.writer(f)
+                # define file header
+                writer.writerow([
+                    'epoch_timestamp',
+                    'pid',
+                    'name',
+                    'status',
+                    'cpu_percent',
+                    'memory_rss_mb',
+                    'num_threads'
+                ])
+            logging.info(f"output file {self.target_csv} created")
+        else:
+            raise FileExistsError
 
-def initialize_csv(target_csv:str):
-    """
-       Create .csv file with header if not exist
-    Args:
-        target_csv (str): .csv file storing the metrics captured
-    """    
-    if not os.path.exists(target_csv):
-        with open(target_csv, mode='w', newline='') as f:
-            writer = csv.writer(f)
-            # define file header
-            writer.writerow([
-                'epoch_timestamp',
-                'pid',
-                'name',
-                'status',
-                'cpu_percent',
-                'memory_rss_mb',
-                'num_threads'
-            ])
-        logging.info(f"output file {target_csv} created")
-    else:
-        raise FileExistsError
-    
 
-def collect_and_store(output_csv:str='output.csv'):
-    """
-       Scan process information throught psutil to gather metrics
-       Write values in .csv file
+    def collect_and_store(self):
+        """
+           Scan process information with psutil to gather metrics
+           Write values in .csv file
+        """
+        logging.info("starting monitoring ...")
+        host_cores = psutil.cpu_count()
+        try:
+            while True:
+                scan_start = time.time()
+                batch_data = []
+                current_pids = set()  # get list of current pids to see who is still alive
 
-    Args:
-        output_csv (str, optional): csv file storing the metrics captured. Defaults to 'output.csv'.
-    """
-    try:
-        initialize_csv(output_csv)
-    except FileExistsError:
-        logging.exception(f"{output_csv} already exists. Cannot overwrite")
-        sys.exit(1)
+                for proc in psutil.process_iter():
+                    pid = proc.pid
+                    current_pids.add(pid)
+                    if pid not in self.process_cache:
+                        self.process_cache[pid] = proc
+                        # call once to "set" the first measurement
+                        self.process_cache[pid].cpu_percent()
+                        continue
 
-    logging.info("starting monitoring ...")
-    try:
-        while True:
-            scan_start = time.time()
-            batch_data = []
-            attrs = [
-                'pid',
-                'name',
-                'status',
-                'cpu_percent',
-                'memory_info',
-                'num_threads'
-            ]
+                    try:
+                        # 'oneshot' context manager creates a snapshot of the process
+                        # it's faster/safer to read inside this block
+                        p = self.process_cache[pid]
+                        with p.oneshot():
+                            logging.debug(f"analyzing pid {p.pid}")
+                            # divide by # of cores for global load
+                            cpu = p.cpu_percent() / host_cores
+                            row = [
+                                scan_start,  # epoch time
+                                p.pid,
+                                p.name(),
+                                p.status(),
+                                cpu,  # CPU usage since last call
+                                p.memory_info().rss / 1024 / 1024,  # get memory in Mb
+                                p.num_threads()
+                            ]
+                            batch_data.append(row)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        # process died or is locked during iteration, skip it
+                        continue
 
-            for proc in psutil.process_iter(attrs):
-                try:
-                    # 'oneshot' context manager creates a snapshot of the process
-                    # it's faster/safer to read inside this block
-                    with proc.oneshot():
-                        logging.debug(f"analyzing pid {proc.pid}")
-                        row = [
-                            scan_start,  # epoch time
-                            proc.pid,
-                            proc.name(),
-                            proc.status(),
-                            proc.cpu_percent(),  # CPU usage since last call
-                            proc.memory_info().rss / 1024 / 1024,  # get memory in Mb
-                            proc.num_threads()
-                        ]
-                        batch_data.append(row)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    # process died or is locked during iteration, skip it
-                    continue
-                
-            if batch_data:
-                with open(output_csv, mode='a', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerows(batch_data)
-                
-            # compute time duration the substract to initial sleep time to prevent shifting measures
-            scan_duration = time.time() - scan_start
-            sleep_time = max(0, interval_seconds - scan_duration)
-            logging.debug(f"scan took {scan_duration:.2f}s. Sleeping {sleep_time:.2f}")
-            time.sleep(sleep_time)
+                self.process_cache = {pid: obj for pid, obj in self.process_cache.items()
+                                      if pid in current_pids}
+                if batch_data:
+                    with open(self.target_csv, mode='a', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerows(batch_data)
 
-    except KeyboardInterrupt:
-        logging.info("Stop monitoring")
+                # compute time duration the subtract to initial sleep time to prevent shifting measures
+                scan_duration = time.time() - scan_start
+                sleep_time = max(0, self.interval_seconds - scan_duration)
+                logging.debug(f"scan took {scan_duration:.2f}s. Sleeping {sleep_time:.2f}")
+                time.sleep(sleep_time)
+
+        except KeyboardInterrupt:
+            logging.info("Stop monitoring")
 
 
 if __name__ == "__main__":
-    collect_and_store()
+     try:
+         logging.info("START OF TEST")
+         fake_load = subprocess.Popen([sys.executable, "-m", "load_emul.generator"])
+         my_monitor = PyMonitor()
+         my_monitor.collect_and_store()
+         fake_load.wait()
+         logging.info("END OF TEST")
+     except FileExistsError as e:
+         logging.exception(f"Output file already exists.\n{e}")
