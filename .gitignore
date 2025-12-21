@@ -1,0 +1,16 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# Data & Logs (ignore the CSVs your script generates)
+*.csv
+*.log
+
+# IDE specific files
+.idea/
+.vscode/
