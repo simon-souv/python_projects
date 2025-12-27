@@ -6,7 +6,8 @@ from utils import do_something
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 class LoadGenerator:
-    """ Class to emulate load on machine by spawning subprocesses
+    """
+    Class to emulate load on machine by spawning subprocesses
     """
     def __init__(self, max_pause:int=10, max_work:int=30, max_iter:int=3, min_procs:int=3, max_procs:int=6):
         """ Constructor

@@ -10,11 +10,18 @@ import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-class PyMonitor:
+class ProcsCollect:
     def __init__(
             self,
             output_csv:str=f'/tmp/py_monitor_data_{gethostname()}_{dt.now().strftime("%Y%m%d_%H%M%S")}.csv',
             interval_s:float=5):
+        """
+        Constructor
+
+        Args:
+            output_csv: path to store csv file with data collected
+            interval_s: frequency of monitoring
+        """
         self.target_csv = output_csv
         self.interval_seconds = float(interval_s)
         self.process_cache = {}
@@ -35,11 +42,10 @@ class PyMonitor:
         else:
             raise FileExistsError
 
-
     def collect_and_store(self):
         """
-           Scan process information with psutil to gather metrics
-           Write values in .csv file
+         scan process information with psutil to gather metrics
+         write values in .csv file
         """
         logging.info("starting monitoring ...")
         host_cores = psutil.cpu_count()
@@ -89,7 +95,7 @@ class PyMonitor:
 
                 # compute time duration the subtract to initial sleep time to prevent shifting measures
                 scan_duration = time.time() - scan_start
-                sleep_time = max(0, self.interval_seconds - scan_duration)
+                sleep_time = self.interval_seconds
                 logging.debug(f"scan took {scan_duration:.2f}s. Sleeping {sleep_time:.2f}")
                 time.sleep(sleep_time)
 
@@ -101,7 +107,7 @@ if __name__ == "__main__":
      try:
          logging.info("START OF TEST")
          fake_load = subprocess.Popen([sys.executable, "-m", "load_emul.generator"])
-         my_monitor = PyMonitor()
+         my_monitor = ProcsCollect()
          my_monitor.collect_and_store()
          fake_load.wait()
          logging.info("END OF TEST")
