@@ -1,3 +1,4 @@
+import argparse
 import multiprocessing
 from random import randint
 import logging
@@ -34,5 +35,18 @@ class LoadGenerator:
 
 
 if __name__ == "__main__":
-    my_load = LoadGenerator()
+    parser = argparse.ArgumentParser(description="Load Generator")
+    # Add arguments that match your LoadGenerator __init__
+    parser.add_argument("--min_procs", type=int, default=3)
+    parser.add_argument("--max_procs", type=int, default=6)
+    parser.add_argument("--max_work", type=int, default=30)
+
+    args = parser.parse_args()
+
+    # Pass the parsed arguments to the class
+    my_load = LoadGenerator(
+        min_procs=args.min_procs,
+        max_procs=args.max_procs,
+        max_work=args.max_work
+    )
     my_load.generate_load()
