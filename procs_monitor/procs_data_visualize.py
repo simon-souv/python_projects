@@ -1,107 +1,121 @@
+import logging
 import pandas as pd
 from bokeh.plotting import figure, output_file, save
 from bokeh.models import ColumnDataSource, HoverTool
 from bokeh.layouts import column
-from bokeh.palettes import Spectral11
+from bokeh.palettes import Category20
 import itertools
 from procs_data_transform import ProcsConvert
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class ProcsVisualizer:
     def __init__(self, df: pd.DataFrame, title: str = "Analyse des Processus"):
         """
-        constructor
 
         Args:
-            df: pandas time series dataframe to plot
-            title: title of the html document
+            df:
+            title:
         """
-        self.df = df
+        self.df = df.copy()
         self.title = title
-        # Palette de couleurs cyclique pour distinguer les PIDs
-        self.colors = itertools.cycle(Spectral11)
+        # Move timestamp from index to column to prevent Bokeh/Pandas conflicts
+        if self.df.index.name == 'timestamp':
+            self.df.reset_index(inplace=True)
+        # Ensure timestamp is datetime objects
+        if 'timestamp' in self.df.columns:
+            self.df['timestamp'] = pd.to_datetime(self.df['timestamp'])
 
     def generate_html(self, output_filename: str = "monitoring_report.html"):
         """
-        generate html file containing the plots
+
         Args:
-            output_filename: html filename
+            output_filename:
 
         Returns:
 
         """
         output_file(output_filename, title=self.title)
 
-        # Création des deux graphiques
-        p_cpu = self._create_line_plot("cpu_percent", "Usage CPU (%)", "blue")
-        p_mem = self._create_line_plot("memory_rss_mb", "Usage Mémoire (MB)", "green")
+        # Filter PIDs, remove those with cpu_usage = 0.0 during the whole observation
+        pid_max_cpu : pd.Series = self.df.groupby('pid')['cpu_percent'].max()  # pd.Series index = pid
+        active_pids : list = pid_max_cpu[pid_max_cpu > 0].sort_values(ascending=False).index.tolist()
 
-        # Mise en page (un graphique au-dessus de l'autre)
+        if not active_pids:
+            logging.info("No active processes (CPU > 0) found.")
+            return
+
+        # COLOR MAPPING: Use Category20 for better visibility on white backgrounds
+        # We cycle through colors so every PID gets a distinct, visible color
+        colors = itertools.cycle(Category20[20])
+        color_map = {pid: next(colors) for pid in active_pids}
+
+        # CREATE PLOTS
+        p_cpu = self._create_line_plot(active_pids, color_map, "cpu_percent", "Usage CPU (%)")
+        p_mem = self._create_line_plot(active_pids, color_map, "memory_rss_mb", "Usage Mémoire (MB)")
+
         layout = column(p_cpu, p_mem, sizing_mode="stretch_width")
-
         save(layout)
-        print(f"Rapport généré avec succès : {output_filename}")
+        print(f"Report generated: {output_filename} ({len(active_pids)} active processes)")
 
-    def _create_line_plot(self, column_name, y_axis_label, default_color):
+    def _create_line_plot(self, pids_to_plot, color_map, column_name, y_axis_label):
         """
 
         Args:
+            pids_to_plot:
+            color_map:
             column_name:
             y_axis_label:
-            default_color:
 
         Returns:
 
         """
-        """Méthode interne pour construire un graphique multi-lignes par PID."""
         p = figure(
-            x_axis_type="datetime",
-            title=f"Évolution de {y_axis_label}",
-            height=400,
-            sizing_mode="stretch_width",
-            toolbar_location="above"
+            title=f"Evolution {y_axis_label}",
+            x_axis_type='datetime',
+            height=450,
+            sizing_mode="stretch_width"
         )
 
-        # On groupe par PID pour tracer une ligne par processus
-        for pid, group in self.df.groupby('pid'):
-            # On récupère le nom du processus (le premier trouvé dans le groupe)
+        for pid in pids_to_plot:
+            group = self.df[self.df['pid'] == pid]
             proc_name = group['name'].iloc[0]
 
             source = ColumnDataSource(group)
-
             p.line(
                 x='timestamp',
                 y=column_name,
                 source=source,
                 legend_label=f"{proc_name} (PID: {pid})",
-                color=next(self.colors),
+                color=color_map[pid],
                 line_width=2,
-                alpha=0.8
+                alpha=0.9  # Increased alpha for better visibility
             )
 
-        # Configuration de l'info-bulle au survol
+        # Tools and Legend
         hover = HoverTool(tooltips=[
-            ("Processus", "@name"),
+            ("Process", "@name"),
             ("PID", "@pid"),
-            ("Valeur", f"@{column_name}{{0.2f}}"),
-            ("Temps", "@timestamp{%F %T}")
+            ("Value", f"@{column_name}{{0.2f}}"),
+            ("Time", "@timestamp{%F %T}")
         ], formatters={'@timestamp': 'datetime'})
 
         p.add_tools(hover)
-        p.legend.click_policy = "hide"  # Permet de cacher une ligne en cliquant sur la légende
+        p.legend.click_policy = "hide"
         p.legend.label_text_font_size = "8pt"
         p.yaxis.axis_label = y_axis_label
+
+        # Hide legend if it becomes too cluttered
+        if len(pids_to_plot) > 20:
+            p.legend.visible = False
 
         return p
 
 
-# --- Exemple d'utilisation avec votre convertisseur ---
 if __name__ == "__main__":
-    # 1. On récupère la Time Series (via la classe précédente)
-    converter = ProcsConvert('/home/simon/tmp/py_monitor_data_simon-ThinkPad-T480s_20251221_175312.csv')
+    csv_file = "/home/simon/tmp/py_monitor_data_simon-ThinkPad-T480s_20260102_150919.csv"
+    converter = ProcsConvert(csv_file)
     df_ts = converter.get_df()
 
-    # 2. On génère le HTML
     viz = ProcsVisualizer(df_ts)
     viz.generate_html("mon_monitoring.html")
-    pass
