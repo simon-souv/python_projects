@@ -46,58 +46,73 @@ class ProcsCollect:
         """
          scan process information with psutil to gather metrics
          write values in .csv file
+
+        Returns:
+
         """
-        logging.info("starting monitoring ...")
+        logging.info("Starting monitoring...")
         host_cores = psutil.cpu_count()
+
+        # Pre-define the attributes to fetch in bulk
+        attrs = ['pid', 'name', 'status', 'memory_info', 'num_threads']
+
         try:
-            while True:
-                scan_start = time.time()
-                batch_data = []
-                current_pids = set()  # get list of current pids to see who is still alive
+            # Keep the file open to avoid the overhead of repeated open/close
+            with open(self.target_csv, mode='a', newline='') as f:
+                writer = csv.writer(f)
 
-                for proc in psutil.process_iter():
-                    pid = proc.pid
-                    current_pids.add(pid)
-                    if pid not in self.process_cache:
-                        self.process_cache[pid] = proc
-                        # call once to "set" the first measurement
-                        self.process_cache[pid].cpu_percent()
-                        continue
+                while True:
+                    scan_start = time.time()
+                    batch_data = []
+                    active_pids = set()
 
-                    try:
-                        # 'oneshot' context manager creates a snapshot of the process
-                        # it's faster/safer to read inside this block
-                        p = self.process_cache[pid]
-                        with p.oneshot():
-                            logging.debug(f"analyzing pid {p.pid}")
-                            # divide by # of cores for global load
-                            cpu = p.cpu_percent() / host_cores
+                    # 1. Use process_iter with 'attrs' for massive speedup
+                    for proc in psutil.process_iter(attrs=attrs):
+                        pid = proc.info['pid']
+                        active_pids.add(pid)
+
+                        try:
+                            # 2. Manage CPU state tracking
+                            if pid not in self.process_cache:
+                                self.process_cache[pid] = proc
+                                proc.cpu_percent()  # Initialize first call
+                                continue
+
+                            cached_proc = self.process_cache[pid]
+                            # Calculate CPU since last interval
+                            cpu_val = cached_proc.cpu_percent()
+
+                            # 3. Access data from proc.info (filled by process_iter)
                             row = [
-                                scan_start,  # epoch time
-                                p.pid,
-                                p.name(),
-                                p.status(),
-                                cpu,  # CPU usage since last call
-                                p.memory_info().rss / 1024 / 1024,  # get memory in Mb
-                                p.num_threads()
+                                scan_start,
+                                pid,
+                                proc.info['name'],
+                                proc.info['status'],
+                                cpu_val,
+                                proc.info['memory_info'].rss / (1024 * 1024),
+                                proc.info['num_threads']
                             ]
                             batch_data.append(row)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                        # process died or is locked during iteration, skip it
-                        continue
 
-                self.process_cache = {pid: obj for pid, obj in self.process_cache.items()
-                                      if pid in current_pids}
-                if batch_data:
-                    with open(self.target_csv, mode='a', newline='') as f:
-                        writer = csv.writer(f)
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+
+                    # 4. Clean cache: remove PIDs that no longer exist
+                    self.process_cache = {pid: p for pid, p in self.process_cache.items()
+                                          if pid in active_pids}
+
+                    # 5. Bulk write
+                    if batch_data:
                         writer.writerows(batch_data)
+                        f.flush()  # Ensure data is written to disk
 
-                # compute time duration the subtract to initial sleep time to prevent shifting measures
-                scan_duration = time.time() - scan_start
-                sleep_time = self.interval_seconds
-                logging.debug(f"scan took {scan_duration:.2f}s. Sleeping {sleep_time:.2f}")
-                time.sleep(sleep_time)
+                    # 6. Prevent "Time Drift"
+                    scan_duration = time.time() - scan_start
+                    # Subtract execution time from the interval to keep ticks consistent
+                    sleep_time = max(0, self.interval_seconds - scan_duration)
+
+                    logging.debug(f"Scan took {scan_duration:.2f}s. Sleeping {sleep_time:.2f}s")
+                    time.sleep(sleep_time)
 
         except KeyboardInterrupt:
             logging.info("Stop monitoring")
@@ -105,8 +120,15 @@ class ProcsCollect:
 
 if __name__ == "__main__":
      try:
+         min_p = 4
+         max_p = 8
          logging.info("START OF TEST")
-         fake_load = subprocess.Popen([sys.executable, "-m", "load_emul.generator"])
+         fake_load = subprocess.Popen([
+             sys.executable,
+             "-m", "load_emul.generator",
+             "--min_procs", str(min_p),
+             "--max_procs", str(max_p)
+         ])
          my_monitor = ProcsCollect()
          my_monitor.collect_and_store()
          fake_load.wait()
