@@ -1,9 +1,7 @@
 import logging
 import pandas as pd
-from bokeh.plotting import figure, output_file, save
-from bokeh.models import ColumnDataSource, HoverTool
-from bokeh.layouts import column
-from bokeh.palettes import Category20
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import itertools
 from procs_data_transform import ProcsConvert
 
@@ -12,14 +10,15 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 class ProcsVisualizer:
     def __init__(self, df: pd.DataFrame, title: str = "Analyse des Processus"):
         """
-
+        Initialize the visualizer with process monitoring data.
+        
         Args:
-            df:
-            title:
+            df: DataFrame containing process monitoring data
+            title: Title for the visualization
         """
         self.df = df.copy()
         self.title = title
-        # Move timestamp from index to column to prevent Bokeh/Pandas conflicts
+        # Move timestamp from index to column if needed
         if self.df.index.name == 'timestamp':
             self.df.reset_index(inplace=True)
         # Ensure timestamp is datetime objects
@@ -28,88 +27,118 @@ class ProcsVisualizer:
 
     def generate_html(self, output_filename: str = "monitoring_report.html"):
         """
-
+        Generate an interactive HTML report with CPU and memory usage plots.
+        
         Args:
-            output_filename:
+            output_filename: Path to save the HTML report
 
         Returns:
-
+            None
         """
-        output_file(output_filename, title=self.title)
-
         # Filter PIDs, remove those with cpu_usage = 0.0 during the whole observation
-        pid_max_cpu : pd.Series = self.df.groupby('pid')['cpu_percent'].max()  # pd.Series index = pid
-        active_pids : list = pid_max_cpu[pid_max_cpu > 0].sort_values(ascending=False).index.tolist()
+        pid_max_cpu = self.df.groupby('pid')['cpu_percent'].max()
+        active_pids = pid_max_cpu[pid_max_cpu > 0].sort_values(ascending=False).index.tolist()
 
         if not active_pids:
             logging.info("No active processes (CPU > 0) found.")
             return
 
-        # COLOR MAPPING: Use Category20 for better visibility on white backgrounds
-        # We cycle through colors so every PID gets a distinct, visible color
-        colors = itertools.cycle(Category20[20])
-        color_map = {pid: next(colors) for pid in active_pids}
+        # COLOR MAPPING: Use Plotly's default color sequence for distinct colors
+        colors = [
+            '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+            '#aec7e8', '#ffbb78', '#98df8a', '#ff9896', '#c5b0d5',
+            '#c49c94', '#f7b6d2', '#c7c7c7', '#dbdb8d', '#9edae5'
+        ]
+        color_cycle = itertools.cycle(colors)
+        color_map = {pid: next(color_cycle) for pid in active_pids}
 
-        # CREATE PLOTS
-        p_cpu = self._create_line_plot(active_pids, color_map, "cpu_percent", "Usage CPU (%)")
-        p_mem = self._create_line_plot(active_pids, color_map, "memory_rss_mb", "Usage Mémoire (MB)")
-
-        layout = column(p_cpu, p_mem, sizing_mode="stretch_width")
-        save(layout)
-        print(f"Report generated: {output_filename} ({len(active_pids)} active processes)")
-
-    def _create_line_plot(self, pids_to_plot, color_map, column_name, y_axis_label):
-        """
-
-        Args:
-            pids_to_plot:
-            color_map:
-            column_name:
-            y_axis_label:
-
-        Returns:
-
-        """
-        p = figure(
-            title=f"Evolution {y_axis_label}",
-            x_axis_type='datetime',
-            height=450,
-            sizing_mode="stretch_width"
+        # CREATE SUBPLOTS
+        fig = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=("Evolution Usage CPU (%)", "Evolution Usage Mémoire (MB)"),
+            vertical_spacing=0.12,
+            specs=[[{"secondary_y": False}], [{"secondary_y": False}]]
         )
 
-        for pid in pids_to_plot:
+        # Add CPU traces
+        for pid in active_pids:
             group = self.df[self.df['pid'] == pid]
             proc_name = group['name'].iloc[0]
-
-            source = ColumnDataSource(group)
-            p.line(
-                x='timestamp',
-                y=column_name,
-                source=source,
-                legend_label=f"{proc_name} (PID: {pid})",
-                color=color_map[pid],
-                line_width=2,
-                alpha=0.9  # Increased alpha for better visibility
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=group['timestamp'],
+                    y=group['cpu_percent'],
+                    mode='lines',
+                    name=f"{proc_name} (PID: {pid})",
+                    line=dict(color=color_map[pid], width=2),
+                    legendgroup=str(pid),
+                    hovertemplate=(
+                        f"<b>{proc_name}</b><br>" +
+                        "PID: %{customdata[0]}<br>" +
+                        "CPU: %{y:.2f}%<br>" +
+                        "Time: %{x|%Y-%m-%d %H:%M:%S}<br>" +
+                        "<extra></extra>"
+                    ),
+                    customdata=group[['pid']].values
+                ),
+                row=1, col=1
             )
 
-        # Tools and Legend
-        hover = HoverTool(tooltips=[
-            ("Process", "@name"),
-            ("PID", "@pid"),
-            ("Value", f"@{column_name}{{0.2f}}"),
-            ("Time", "@timestamp{%F %T}")
-        ], formatters={'@timestamp': 'datetime'})
+        # Add Memory traces
+        for pid in active_pids:
+            group = self.df[self.df['pid'] == pid]
+            proc_name = group['name'].iloc[0]
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=group['timestamp'],
+                    y=group['memory_rss_mb'],
+                    mode='lines',
+                    name=f"{proc_name} (PID: {pid})",
+                    line=dict(color=color_map[pid], width=2),
+                    legendgroup=str(pid),
+                    showlegend=False,  # Don't duplicate legend
+                    hovertemplate=(
+                        f"<b>{proc_name}</b><br>" +
+                        "PID: %{customdata[0]}<br>" +
+                        "Memory: %{y:.2f} MB<br>" +
+                        "Time: %{x|%Y-%m-%d %H:%M:%S}<br>" +
+                        "<extra></extra>"
+                    ),
+                    customdata=group[['pid']].values
+                ),
+                row=2, col=1
+            )
 
-        p.add_tools(hover)
-        p.legend.click_policy = "hide"
-        p.legend.label_text_font_size = "8pt"
-        p.yaxis.axis_label = y_axis_label
+        # Update layout
+        fig.update_xaxes(title_text="Time", row=2, col=1)
+        fig.update_yaxes(title_text="CPU Usage (%)", row=1, col=1)
+        fig.update_yaxes(title_text="Memory Usage (MB)", row=2, col=1)
 
-        # Hide legend if it becomes too cluttered
-        if len(pids_to_plot) > 20:
-            p.legend.visible = False
+        fig.update_layout(
+            title=dict(text=self.title, x=0.5, xanchor='center'),
+            height=900,
+            hovermode='closest',
+            legend=dict(
+                orientation="v",
+                yanchor="top",
+                y=1,
+                xanchor="left",
+                x=1.02,
+                font=dict(size=9)
+            ),
+            template="plotly_white"
+        )
 
-        return p
+        # Hide legend if too many processes
+        if len(active_pids) > 20:
+            fig.update_layout(showlegend=False)
+
+        # Save to HTML
+        fig.write_html(output_filename, config={'responsive': True})
+        print(f"Report generated: {output_filename} ({len(active_pids)} active processes)")
 
 
 if __name__ == "__main__":
