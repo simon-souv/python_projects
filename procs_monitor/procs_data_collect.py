@@ -51,10 +51,10 @@ class ProcsCollect:
 
         """
         logging.info("Starting monitoring...")
-        host_cores = psutil.cpu_count()
-
+        # host_cores = psutil.cpu_count()  # divide cpu+percent per host_cores if you want overall cpu usage
         # Pre-define the attributes to fetch in bulk
         attrs = ['pid', 'name', 'status', 'memory_info', 'num_threads']
+        next_scan_time = time.time()
 
         try:
             # Keep the file open to avoid the overhead of repeated open/close
@@ -67,35 +67,42 @@ class ProcsCollect:
                     active_pids = set()
 
                     # 1. Use process_iter with 'attrs' for massive speedup
-                    for proc in psutil.process_iter(attrs=attrs):
-                        pid = proc.info['pid']
-                        active_pids.add(pid)
+                    try:
+                        for proc in psutil.process_iter(attrs=attrs, ad_value=None):
+                            # If access denied, proc.info will contain None values
+                            if proc.info['pid'] is None:
+                                continue  # Skip inaccessible processes gracefully
 
-                        try:
-                            # 2. Manage CPU state tracking
-                            if pid not in self.process_cache:
-                                self.process_cache[pid] = proc
-                                proc.cpu_percent()  # Initialize first call
+                            pid = proc.info['pid']
+                            active_pids.add(pid)
+
+                            try:
+                                # 2. Manage CPU state tracking
+                                if pid not in self.process_cache:
+                                    self.process_cache[pid] = proc
+                                    proc.cpu_percent()  # Initialize first call
+                                    cpu_val = 0.0
+                                else:
+                                    self.process_cache[pid] = proc
+                                    cpu_val = proc.cpu_percent()
+
+                                # 3. Access data from proc.info (filled by process_iter)
+                                row = [
+                                    scan_start,
+                                    pid,
+                                    proc.info['name'],
+                                    proc.info['status'],
+                                    cpu_val,
+                                    proc.info['memory_info'].rss / (1024 * 1024),
+                                    proc.info['num_threads']
+                                ]
+                                batch_data.append(row)
+
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
                                 continue
-
-                            cached_proc = self.process_cache[pid]
-                            # Calculate CPU since last interval
-                            cpu_val = cached_proc.cpu_percent()
-
-                            # 3. Access data from proc.info (filled by process_iter)
-                            row = [
-                                scan_start,
-                                pid,
-                                proc.info['name'],
-                                proc.info['status'],
-                                cpu_val,
-                                proc.info['memory_info'].rss / (1024 * 1024),
-                                proc.info['num_threads']
-                            ]
-                            batch_data.append(row)
-
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            continue
+                    except (psutil.Error, OSError) as e1:
+                        # Catch catastrophic failures in process iteration itself
+                        logging.warning(f"Process iteration error: {e1}")
 
                     # 4. Clean cache: remove PIDs that no longer exist
                     self.process_cache = {pid: p for pid, p in self.process_cache.items()
@@ -107,11 +114,15 @@ class ProcsCollect:
                         f.flush()  # Ensure data is written to disk
 
                     # 6. Prevent "Time Drift"
-                    scan_duration = time.time() - scan_start
-                    # Subtract execution time from the interval to keep ticks consistent
-                    sleep_time = max(0, self.interval_seconds - scan_duration)
+                    next_scan_time += self.interval_seconds
+                    current_time = time.time()
+                    sleep_time = max(0.0, next_scan_time - current_time)
+                    # Log if we're falling behind
+                    if sleep_time == 0.0:
+                        behind = current_time - next_scan_time
+                        logging.warning(f"Scan took too long! Behind by {behind:.2f}s")
 
-                    logging.debug(f"Scan took {scan_duration:.2f}s. Sleeping {sleep_time:.2f}s")
+                    logging.debug(f"Sleeping {sleep_time:.2f}s until next scan")
                     time.sleep(sleep_time)
 
         except KeyboardInterrupt:
